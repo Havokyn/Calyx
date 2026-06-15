@@ -1,0 +1,4 @@
+# Allowlisted gitleaks fingerprints (example/dummy values in test fixtures,
+# not real credentials). Tracked as exact fingerprints so genuine leaks still
+# fail the gate. Do not add credential values here.
+cc9f57b0a9c426b7b66899bdec323eba74fe223e:crates/calyx-aster/src/dedup/audit_tests.rs:generic-api-key:58

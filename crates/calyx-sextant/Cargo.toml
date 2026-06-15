@@ -1,0 +1,28 @@
+[package]
+name = "calyx-sextant"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+blake3.workspace = true
+calyx-aster = { path = "../calyx-aster" }
+calyx-core = { path = "../calyx-core" }
+calyx-paths = { path = "../calyx-paths" }
+calyx-ward = { path = "../calyx-ward" }
+memmap2.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+zeroize = "1"
+
+[dev-dependencies]
+calyx-loom = { path = "../calyx-loom" }
+calyx-oracle = { path = "../calyx-oracle" }
+proptest.workspace = true
+sha2.workspace = true
