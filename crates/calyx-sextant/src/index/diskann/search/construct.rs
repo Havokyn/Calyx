@@ -1,12 +1,14 @@
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use calyx_core::{CxId, Result, SlotId};
 
-use super::helpers::{dense_rows, invalid, io, open_for_search, positions};
+use super::helpers::{dense_rows, invalid, open_for_search, positions};
 use super::pq_support::write_pq_sidecar;
-use super::storage::{build_search_graph_with_backend, default_raw_sidecar, read_distance_mode};
-use super::{DiskAnnSearch, DiskAnnSearchParams, SearchBuildSidecars};
+use super::storage::{
+    build_search_graph_raw_l2_with_backend, build_search_graph_with_backend, default_raw_sidecar,
+    read_distance_mode,
+};
+use super::{DiskAnnSearch, DiskAnnSearchParams, SearchBuildSidecars, prefetch_file_for_graph};
 use crate::index::diskann::build::{DiskAnnBuildBackend, DiskAnnBuildParams};
 use crate::index::diskann::pq::{DiskAnnPqIndex, default_pq_sidecar};
 
@@ -34,7 +36,7 @@ impl DiskAnnSearch {
             path.is_dir().then_some(path)
         });
         let pq = DiskAnnPqIndex::read_if_exists(&default_pq_sidecar(&graph_path))?;
-        let graph_file = File::open(&graph_path).map_err(|e| io("open graph for prefetch", e))?;
+        let graph_file = prefetch_file_for_graph(&graph_path, &reader)?;
         let build_params = DiskAnnBuildParams {
             dim: header.dim as usize,
             m_max: header.m_max as usize,
@@ -48,7 +50,7 @@ impl DiskAnnSearch {
             raw_sidecar,
             pq,
             reader: Some(reader),
-            graph_file: Some(graph_file),
+            graph_file,
             distance_mode,
             positions: positions(&ids),
             ids,
@@ -129,6 +131,36 @@ impl DiskAnnSearch {
                 backend,
             },
         )
+    }
+
+    pub(crate) fn build_raw_l2_without_default_raw_sidecar_with_backend(
+        slot: SlotId,
+        graph_path: impl Into<PathBuf>,
+        rows: &[(CxId, Vec<f32>)],
+        build_params: DiskAnnBuildParams,
+        raw_sidecar: Option<PathBuf>,
+        default_search: DiskAnnSearchParams,
+        backend: DiskAnnBuildBackend,
+    ) -> Result<Self> {
+        let graph_path = graph_path.into();
+        let dense_rows = dense_rows(rows, build_params.dim)?;
+        build_search_graph_raw_l2_with_backend(
+            &graph_path,
+            &dense_rows,
+            build_params,
+            raw_sidecar,
+            false,
+            backend,
+        )?;
+        let mut search = Self::open(
+            slot,
+            graph_path,
+            rows.iter().map(|(cx_id, _)| *cx_id).collect(),
+            None,
+            default_search,
+        )?;
+        search.build_backend = backend;
+        Ok(search)
     }
 
     pub(super) fn build_with_default_raw_sidecar(

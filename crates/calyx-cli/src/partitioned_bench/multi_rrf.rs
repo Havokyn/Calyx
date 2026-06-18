@@ -7,14 +7,17 @@ use std::time::Instant;
 use calyx_core::{CxId, SlotId};
 use calyx_sextant::fusion;
 use calyx_sextant::index::partitioned::cx;
-use calyx_sextant::index::{FbinVectors, PartitionedSearch};
+use calyx_sextant::index::{DenseVectorFile, PartitionedSearch};
 use calyx_sextant::{FusionContext, FusionStrategy, IndexSearchHit};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::brute_force::brute_force_topk_fbin_ranked;
-use super::{enforce_recall_floor, percentiles};
+use super::brute_force::brute_force_topk_vecfile_ranked;
+use super::{enforce_recall_floor, percentiles, row_for_metric};
 use crate::error::{CliError, CliResult};
+
+#[path = "multi_rrf/a35.rs"]
+mod a35;
 
 const DEFAULT_TRUTH_DEPTH: usize = 64;
 
@@ -39,6 +42,9 @@ struct Plan {
 #[derive(Clone, Debug, Deserialize)]
 struct PlanSlot {
     slot: u16,
+    lens_id: Option<String>,
+    weights_sha256: Option<String>,
+    bits_about: Option<f32>,
     vault: PathBuf,
     queries: PathBuf,
     corpus: PathBuf,
@@ -47,8 +53,9 @@ struct PlanSlot {
 struct OpenSlot {
     spec: PlanSlot,
     search: PartitionedSearch,
-    queries: FbinVectors,
-    corpus: FbinVectors,
+    queries: DenseVectorFile,
+    corpus: DenseVectorFile,
+    distance_metric: calyx_sextant::index::PartitionDistanceMetric,
 }
 
 impl Args {
@@ -100,6 +107,7 @@ impl Args {
 pub(crate) fn run(raw: &[String]) -> CliResult {
     let args = Args::parse(raw)?;
     let plan = load_plan(&args.plan)?;
+    a35::validate_plan(&plan)?;
     let slots = open_slots(&plan)?;
     let n = slots
         .iter()
@@ -124,10 +132,10 @@ pub(crate) fn run(raw: &[String]) -> CliResult {
         let started = Instant::now();
         let mut per_slot = BTreeMap::new();
         for slot in &slots {
-            let query = slot.queries.row(query_idx as u64);
+            let query = row_for_metric(&slot.queries, query_idx as u64, slot.distance_metric);
             let raw_hits = slot
                 .search
-                .search(query, truth_depth, args.n_probe, args.region_beam)
+                .search(&query, truth_depth, args.n_probe, args.region_beam)
                 .map_err(CliError::Calyx)?;
             let hits = to_index_hits(raw_hits);
             if query_idx < truth_n {
@@ -158,10 +166,13 @@ pub(crate) fn run(raw: &[String]) -> CliResult {
         (None, Vec::new(), None, Vec::new())
     };
     enforce_recall_floor(args.recall_floor, truth_n, fused_recall)?;
+    let latency_us = percentiles(&fused_latencies_us);
     let report = json!({
         "trigger": "calyx bench partitioned-rrf",
         "mode": "real_multi_slot_rrf",
         "plan": args.plan,
+        "lens_roster": a35::lens_roster(&slots),
+        "per_lens_bits": a35::per_lens_bits(&slots),
         "slots": slot_report(&slots),
         "queries": n,
         "k": args.k,
@@ -170,8 +181,9 @@ pub(crate) fn run(raw: &[String]) -> CliResult {
         "per_slot_search_depth": truth_depth,
         "truth_depth": truth_depth,
         "ground_truth_queries": truth_n,
-        "latency_us": percentiles(&fused_latencies_us),
+        "latency_us": latency_us.clone(),
         "fused_ground_truth_recall_at_k": fused_recall,
+        "fused_result": a35::fused_result(fused_recall, &latency_us, &sample_readback),
         "best_single_lens_recall_vs_fused_truth": best_single,
         "fusion_matches_or_beats_best_single": fused_recall.zip(best_single).map(|(fused, single)| fused + f32::EPSILON >= single),
         "per_slot_recall_vs_fused_truth": per_slot_recall,
@@ -188,11 +200,6 @@ pub(crate) fn run(raw: &[String]) -> CliResult {
 
 fn load_plan(path: &Path) -> CliResult<Plan> {
     let plan: Plan = serde_json::from_slice(&std::fs::read(path)?)?;
-    if plan.slots.len() < 2 {
-        return Err(CliError::usage(
-            "partitioned-rrf plan requires at least two slots",
-        ));
-    }
     let mut seen = BTreeSet::new();
     for slot in &plan.slots {
         if !seen.insert(slot.slot) {
@@ -210,8 +217,8 @@ fn open_slots(plan: &Plan) -> CliResult<Vec<OpenSlot>> {
         .iter()
         .map(|slot| {
             let search = PartitionedSearch::open(&slot.vault).map_err(CliError::Calyx)?;
-            let queries = FbinVectors::open(&slot.queries).map_err(CliError::Calyx)?;
-            let corpus = FbinVectors::open(&slot.corpus).map_err(CliError::Calyx)?;
+            let queries = DenseVectorFile::open(&slot.queries).map_err(CliError::Calyx)?;
+            let corpus = DenseVectorFile::open(&slot.corpus).map_err(CliError::Calyx)?;
             if queries.dim() != search.dim() || corpus.dim() != search.dim() {
                 return Err(CliError::usage(format!(
                     "slot {} dim mismatch: vault={} queries={} corpus={}",
@@ -223,6 +230,7 @@ fn open_slots(plan: &Plan) -> CliResult<Vec<OpenSlot>> {
             }
             Ok(OpenSlot {
                 spec: slot.clone(),
+                distance_metric: search.manifest().distance_metric,
                 search,
                 queries,
                 corpus,
@@ -255,10 +263,15 @@ fn recall_readback(
         let mut exact_per_slot = BTreeMap::new();
         let mut exact_slot_rows = Vec::new();
         for slot in slots {
-            let query = slot.queries.row(query_idx as u64).to_vec();
-            let exact = brute_force_topk_fbin_ranked(&slot.corpus, &[query], truth_depth)
-                .pop()
-                .expect("one query");
+            let query = row_for_metric(&slot.queries, query_idx as u64, slot.distance_metric);
+            let exact = brute_force_topk_vecfile_ranked(
+                &slot.corpus,
+                &[query],
+                truth_depth,
+                slot.distance_metric,
+            )
+            .pop()
+            .expect("one query");
             exact_slot_rows.push(json!({
                 "slot": slot.spec.slot,
                 "exact_top_k": exact.iter().take(k).map(|(id, _)| *id).collect::<Vec<_>>(),
@@ -373,6 +386,9 @@ fn slot_report(slots: &[OpenSlot]) -> Vec<serde_json::Value> {
         .map(|slot| {
             json!({
                 "slot": slot.spec.slot,
+                "lens_id": slot.spec.lens_id.as_deref().expect("A35 validated"),
+                "weights_sha256": slot.spec.weights_sha256.as_deref().expect("A35 validated"),
+                "bits_about": slot.spec.bits_about.expect("A35 validated"),
                 "vault": slot.spec.vault,
                 "queries": slot.spec.queries,
                 "corpus": slot.spec.corpus,

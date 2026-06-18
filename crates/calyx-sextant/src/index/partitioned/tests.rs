@@ -1,4 +1,7 @@
-use super::assignment::{AssignmentSink, read_ids, stream_assign_to_ids_bounded};
+use super::assignment::{
+    AssignmentRouting, AssignmentSink, BoundedAssignmentConfig, read_ids,
+    stream_assign_to_ids_bounded, stream_assign_to_ids_with_routing,
+};
 use super::balance::balance_regions;
 use super::*;
 
@@ -82,9 +85,19 @@ fn bounded_final_assignment_caps_regions_and_preserves_ids() {
         rows.push(vec![-1.0, 0.0]);
     }
     let source = StaticSource { rows };
-    let regions =
-        stream_assign_to_ids_bounded(&dir, AssignmentSink::Final, &centroids, &source, 4, 6, 2)
-            .expect("bounded assignment");
+    let regions = stream_assign_to_ids_bounded(
+        &dir,
+        AssignmentSink::Final,
+        &centroids,
+        &source,
+        4,
+        BoundedAssignmentConfig {
+            cap: 6,
+            routing_probe: 2,
+            routing: AssignmentRouting::Hnsw,
+        },
+    )
+    .expect("bounded assignment");
 
     assert_eq!(regions.iter().map(|r| r.count).sum::<usize>(), 12);
     assert!(
@@ -97,6 +110,62 @@ fn bounded_final_assignment_caps_regions_and_preserves_ids() {
     }
     ids.sort_unstable();
     assert_eq!(ids, (0..12).collect::<Vec<_>>());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn assignment_writes_nofile_scale_region_count_without_stale_ids() {
+    let dir = std::env::temp_dir().join(format!("calyx-part-fd-scale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let region_count = 1_200usize;
+    let rows: Vec<Vec<f32>> = (0..region_count)
+        .map(|idx| vec![idx as f32 * 10.0, 0.0])
+        .collect();
+    let centroids =
+        SpannCentroidIndex::from_parts(2, rows.clone(), Vec::new(), Vec::new()).expect("centroids");
+    let source = StaticSource { rows };
+
+    let stale = dir.join("idx/assign-initial/region_00007.ids");
+    std::fs::create_dir_all(stale.parent().expect("parent")).expect("mkdir");
+    let mut stale_bytes = Vec::new();
+    stale_bytes.extend_from_slice(&9_999u64.to_le_bytes());
+    stale_bytes.extend_from_slice(&8_888u64.to_le_bytes());
+    std::fs::write(&stale, stale_bytes).expect("stale ids");
+
+    let provisional = stream_assign_to_ids_with_routing(
+        &dir,
+        AssignmentSink::Provisional,
+        &centroids,
+        &source,
+        37,
+        AssignmentRouting::Exact,
+    )
+    .expect("provisional assignment");
+    assert_eq!(provisional.len(), region_count);
+    assert_eq!(
+        read_ids(&dir.join("idx/assign-initial/region_00007.ids")).expect("ids"),
+        vec![7],
+        "assignment must clear stale bytes before append-mode chunk writes"
+    );
+
+    let final_regions = stream_assign_to_ids_bounded(
+        &dir,
+        AssignmentSink::Final,
+        &centroids,
+        &source,
+        41,
+        BoundedAssignmentConfig {
+            cap: 1,
+            routing_probe: 1,
+            routing: AssignmentRouting::Exact,
+        },
+    )
+    .expect("bounded assignment");
+    assert_eq!(final_regions.len(), region_count);
+    assert_eq!(
+        read_ids(&dir.join("idx/region_01199.ids")).expect("ids"),
+        vec![1_199]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -238,6 +307,72 @@ fn region_build_parallelism_is_effective_cap_and_zero_rejected() {
     let err = build_partitioned_vault(&dir, p).unwrap_err();
     assert_eq!(err.code, crate::error::CALYX_INDEX_INVALID_PARAMS);
     assert!(err.message.contains("region_build_parallelism"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn raw_l2_centroid_routing_uses_exact_l2_not_cosine() {
+    let centroids = SpannCentroidIndex::from_parts(
+        2,
+        vec![vec![100.0, 0.0], vec![9.0, 1.0]],
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("centroids");
+
+    let raw_l2 = centroids.nearest_centroids_exact_l2(&[10.0, 0.0], 1);
+    assert_eq!(raw_l2, vec![1], "[9,1] is nearest by raw L2");
+}
+
+#[test]
+fn raw_l2_graph_centroid_routing_preserves_raw_l2_order() {
+    let centroids = SpannCentroidIndex::from_parts(
+        2,
+        (0..80).map(|idx| vec![idx as f32 * 10.0, 0.0]).collect(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("centroids");
+
+    let routed = centroids.nearest_centroids_raw_l2_graph(&[410.0, 0.0], 1);
+    assert_eq!(
+        routed,
+        vec![41],
+        "raw-L2 graph routes to raw-nearest centroid"
+    );
+}
+
+#[test]
+fn raw_l2_graph_assignment_writes_nearest_raw_region_ids() {
+    let dir = std::env::temp_dir().join(format!("calyx-part-raw-l2-graph-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let centroids = SpannCentroidIndex::from_parts(
+        2,
+        (0..80).map(|idx| vec![idx as f32 * 10.0, 0.0]).collect(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("centroids");
+    let source = StaticSource {
+        rows: vec![vec![410.0, 0.0]],
+    };
+
+    let regions = stream_assign_to_ids_with_routing(
+        &dir,
+        AssignmentSink::Final,
+        &centroids,
+        &source,
+        1,
+        AssignmentRouting::RawL2Graph,
+    )
+    .expect("raw l2 graph assignment");
+
+    assert_eq!(regions.len(), 1);
+    assert_eq!(regions[0].id, 41);
+    assert_eq!(
+        read_ids(&dir.join(&regions[0].ids_rel)).expect("ids"),
+        vec![0]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
