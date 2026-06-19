@@ -158,7 +158,7 @@ fn stream_vectors(
         let row = data::parse_vector_row(line_idx, line)?;
         data::validate_row(line_idx, &row)?;
         data::ensure_selected_present(&row, &selected_set, line_idx)?;
-        for name in &selected_set {
+        for name in selected {
             let vector = &row.lenses[name];
             validate_selected_vector(line_idx, name, vector, dims[name])?;
             write_selected_row(
@@ -262,6 +262,7 @@ fn write_plan(path: &Path, timeline_path: &str, lenses: &[LensEvidence]) -> CliR
         .map(|lens| {
             json!({
                 "slot": lens.slot,
+                "name": lens.name,
                 "lens_id": lens.lens_id,
                 "weights_sha256": lens.weights_sha256,
                 "bits_about": lens.bits_about,
