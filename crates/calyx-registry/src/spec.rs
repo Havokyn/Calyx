@@ -44,6 +44,10 @@ pub enum LensRuntime {
         model_id: String,
         files: Vec<PathBuf>,
     },
+    OnnxColbert {
+        model_id: String,
+        files: Vec<PathBuf>,
+    },
     FastembedSparse {
         model_id: String,
         files: Vec<PathBuf>,
@@ -56,6 +60,12 @@ pub enum LensRuntime {
     FastembedReranker {
         model_id: String,
         files: Vec<PathBuf>,
+    },
+    FastembedQwen3 {
+        model_id: String,
+        files: Vec<PathBuf>,
+        #[serde(default = "default_qwen3_dtype")]
+        dtype: String,
     },
     StaticLookup {
         embeddings_file: PathBuf,
@@ -132,9 +142,11 @@ impl LensSpec {
             LensRuntime::TeiHttp { endpoint } => probe_http(endpoint),
             LensRuntime::CandleLocal { files, .. } => candle_local_health(files),
             LensRuntime::Onnx { files, .. }
+            | LensRuntime::OnnxColbert { files, .. }
             | LensRuntime::FastembedSparse { files, .. }
             | LensRuntime::FastembedBgem3 { files, .. }
-            | LensRuntime::FastembedReranker { files, .. } => files_runtime_health(files),
+            | LensRuntime::FastembedReranker { files, .. }
+            | LensRuntime::FastembedQwen3 { files, .. } => files_runtime_health(files),
             LensRuntime::StaticLookup {
                 embeddings_file,
                 tokenizer,
@@ -174,6 +186,10 @@ fn default_candle_dtype() -> String {
 
 fn default_candle_pooling() -> String {
     "mean".to_string()
+}
+
+fn default_qwen3_dtype() -> String {
+    "bf16".to_string()
 }
 
 pub const fn default_quant_default() -> QuantPolicy {

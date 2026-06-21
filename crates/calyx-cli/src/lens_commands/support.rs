@@ -1,8 +1,8 @@
 use calyx_core::{CalyxError, LensId, Modality, Result, SlotShape, SlotVector};
 use calyx_registry::{
-    AlgorithmicLens, CandleLens, FastembedBgem3Lens, FastembedRerankerLens, FastembedSparseLens,
-    FrozenLensContract, LensRuntime, LensSpec, MultimodalAdapterLens, NormPolicy, OnnxLens,
-    Registry, StaticLookupLens, TeiHttpLens,
+    AlgorithmicLens, CandleLens, FastembedBgem3Lens, FastembedQwen3Lens, FastembedRerankerLens,
+    FastembedSparseLens, FrozenLensContract, LensRuntime, LensSpec, MultimodalAdapterLens,
+    NormPolicy, OnnxColbertLens, OnnxLens, Registry, StaticLookupLens, TeiHttpLens,
 };
 
 use crate::error::{CliError, CliResult};
@@ -13,9 +13,11 @@ pub(crate) fn runtime_name(runtime: &LensRuntime) -> &'static str {
         LensRuntime::TeiHttp { .. } => "tei_http",
         LensRuntime::CandleLocal { .. } => "candle_local",
         LensRuntime::Onnx { .. } => "onnx",
+        LensRuntime::OnnxColbert { .. } => "onnx_colbert",
         LensRuntime::FastembedSparse { .. } => "fastembed_sparse",
         LensRuntime::FastembedBgem3 { .. } => "fastembed_bgem3",
         LensRuntime::FastembedReranker { .. } => "fastembed_reranker",
+        LensRuntime::FastembedQwen3 { .. } => "fastembed_qwen3",
         LensRuntime::StaticLookup { .. } => "static_lookup",
         LensRuntime::MultimodalAdapter { .. } => "multimodal_adapter",
         LensRuntime::ExternalCmd { .. } => "external_cmd",
@@ -26,6 +28,11 @@ pub(crate) fn register_manifest_runtime(registry: &mut Registry, spec: LensSpec)
     match &spec.runtime {
         LensRuntime::Onnx { .. } => {
             let lens = OnnxLens::from_lens_spec(&spec)?;
+            let contract = lens.contract().clone();
+            registry.register_frozen_with_spec(lens, contract, spec)
+        }
+        LensRuntime::OnnxColbert { .. } => {
+            let lens = OnnxColbertLens::from_lens_spec(&spec)?;
             let contract = lens.contract().clone();
             registry.register_frozen_with_spec(lens, contract, spec)
         }
@@ -41,6 +48,11 @@ pub(crate) fn register_manifest_runtime(registry: &mut Registry, spec: LensSpec)
         }
         LensRuntime::FastembedReranker { .. } => {
             let lens = FastembedRerankerLens::from_lens_spec(&spec)?;
+            let contract = lens.contract().clone();
+            registry.register_frozen_with_spec(lens, contract, spec)
+        }
+        LensRuntime::FastembedQwen3 { .. } => {
+            let lens = FastembedQwen3Lens::from_lens_spec(&spec)?;
             let contract = lens.contract().clone();
             registry.register_frozen_with_spec(lens, contract, spec)
         }

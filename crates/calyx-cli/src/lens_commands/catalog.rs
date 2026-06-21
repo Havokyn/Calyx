@@ -6,7 +6,7 @@ use std::time::Instant;
 use calyx_core::{Input, Lens, LensCost, Placement};
 use calyx_registry::{
     LensHealth, LensRuntime, LensSpec, PlacementBudget, StaticLookupLens, choose_placement,
-    lens_spec_from_manifest_path,
+    lens_spec_from_manifest_path, lens_spec_metadata_from_manifest_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -99,10 +99,10 @@ pub(crate) fn add_manifest_to_catalog(
     let catalog_path = catalog_path(home)?;
     let mut catalog = read_catalog(&catalog_path)?;
     let lens_id = spec.lens_id().to_string();
-    catalog.lenses.retain(|item| item.lens_id != lens_id);
+    retain_unrelated_entries(&mut catalog, &lens_id, &spec.name, &manifest);
     let budget = placement_budget_from_catalog(&catalog)?;
     let entry = entry_from_spec(&spec, manifest, budget)?;
-    catalog.lenses.retain(|item| item.lens_id != entry.lens_id);
+    retain_unrelated_entries(&mut catalog, &entry.lens_id, &entry.name, &entry.manifest);
     catalog.lenses.push(entry.clone());
     catalog
         .lenses
@@ -117,6 +117,21 @@ pub(crate) fn add_manifest_to_catalog(
         placement: entry.placement,
         count: catalog.lenses.len(),
     })
+}
+
+fn retain_unrelated_entries(catalog: &mut LensCatalog, lens_id: &str, name: &str, manifest: &Path) {
+    catalog
+        .lenses
+        .retain(|item| !same_catalog_identity(item, lens_id, name, manifest));
+}
+
+fn same_catalog_identity(
+    entry: &LensCatalogEntry,
+    lens_id: &str,
+    name: &str,
+    manifest: &Path,
+) -> bool {
+    entry.lens_id == lens_id || entry.name == name || entry.manifest == manifest
 }
 
 fn catalog_path(home: Option<&Path>) -> CliResult<PathBuf> {
@@ -144,7 +159,7 @@ fn list_entry(entry: LensCatalogEntry) -> ListLensEntry {
 }
 
 fn health_from_manifest(path: &Path) -> LensHealth {
-    match lens_spec_from_manifest_path(path) {
+    match lens_spec_metadata_from_manifest_path(path) {
         Ok(spec) => spec.health(),
         Err(error) => LensHealth::Failing {
             code: error.code.to_string(),
@@ -188,9 +203,18 @@ fn entry_from_spec(
 fn estimate_lens_cost(spec: &LensSpec) -> CliResult<LensCost> {
     match &spec.runtime {
         LensRuntime::Algorithmic { .. }
-        | LensRuntime::MultimodalAdapter { .. }
         | LensRuntime::ExternalCmd { .. }
         | LensRuntime::TeiHttp { .. } => Ok(LensCost::zero()),
+        LensRuntime::MultimodalAdapter { files, .. } => {
+            let bytes = files_size(files)?;
+            Ok(LensCost {
+                total_ms: 0.0,
+                ms_per_input: 0.0,
+                vram_bytes: 0,
+                ram_bytes: bytes,
+                batch_ceiling: u32::MAX,
+            })
+        }
         LensRuntime::StaticLookup {
             embeddings_file,
             tokenizer,
@@ -198,9 +222,11 @@ fn estimate_lens_cost(spec: &LensSpec) -> CliResult<LensCost> {
         } => measure_static_lookup_cost(spec, embeddings_file, tokenizer),
         LensRuntime::CandleLocal { files, .. }
         | LensRuntime::Onnx { files, .. }
+        | LensRuntime::OnnxColbert { files, .. }
         | LensRuntime::FastembedSparse { files, .. }
         | LensRuntime::FastembedBgem3 { files, .. }
-        | LensRuntime::FastembedReranker { files, .. } => {
+        | LensRuntime::FastembedReranker { files, .. }
+        | LensRuntime::FastembedQwen3 { files, .. } => {
             let bytes = files_size(files)?;
             Ok(LensCost {
                 total_ms: 0.0,
@@ -306,4 +332,133 @@ fn env_usize(name: &str, default: usize) -> CliResult<usize> {
 
 const fn gib() -> u64 {
     1024 * 1024 * 1024
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn catalog_replacement_removes_prior_name_manifest_or_id() {
+        let mut catalog = LensCatalog {
+            lenses: vec![
+                entry("same-id", "old", "old.json"),
+                entry("other-id", "same-name", "other.json"),
+                entry("third-id", "third", "same-path.json"),
+                entry("keep-id", "keep", "keep.json"),
+            ],
+        };
+
+        retain_unrelated_entries(
+            &mut catalog,
+            "same-id",
+            "same-name",
+            Path::new("same-path.json"),
+        );
+
+        assert_eq!(catalog.lenses.len(), 1);
+        assert_eq!(catalog.lenses[0].lens_id, "keep-id");
+    }
+
+    #[test]
+    fn multimodal_adapter_cost_counts_files_as_cpu_ram() {
+        let root = temp_root("multimodal-cost");
+        let model = root.join("model.onnx");
+        let adapter = root.join("adapter.json");
+        fs::write(&model, [1_u8; 11]).unwrap();
+        fs::write(&adapter, [2_u8; 7]).unwrap();
+        let spec = LensSpec {
+            name: "fixture-image-adapter".to_string(),
+            runtime: LensRuntime::MultimodalAdapter {
+                axis: "image".to_string(),
+                model_id: "fixture/model".to_string(),
+                adapter_config: Some(adapter.clone()),
+                files: vec![model, adapter],
+            },
+            output: calyx_core::SlotShape::Dense(16),
+            modality: calyx_core::Modality::Image,
+            weights_sha256: [1_u8; 32],
+            corpus_hash: [2_u8; 32],
+            norm_policy: calyx_registry::NormPolicy::unit(),
+            max_batch: None,
+            axis: Some("image:fixture/model".to_string()),
+            asymmetry: calyx_core::Asymmetry::None,
+            quant_default: calyx_core::QuantPolicy::turboquant_default(),
+            truncate_dim: None,
+            recall_delta: 0.02,
+            retrieval_only: false,
+            excluded_from_dedup: false,
+        };
+
+        let cost = estimate_lens_cost(&spec).unwrap();
+
+        assert_eq!(cost.vram_bytes, 0);
+        assert_eq!(cost.ram_bytes, 18);
+        assert_eq!(cost.batch_ceiling, u32::MAX);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn entry(lens_id: &str, name: &str, manifest: &str) -> LensCatalogEntry {
+        LensCatalogEntry {
+            lens_id: lens_id.to_string(),
+            name: name.to_string(),
+            modality: "text".to_string(),
+            runtime: "onnx_colbert".to_string(),
+            dim: 384,
+            retrieval_only: false,
+            excluded_from_dedup: false,
+            weights_sha256: "00".repeat(32),
+            manifest: PathBuf::from(manifest),
+            cost: LensCost::zero(),
+            placement: Placement::Cpu,
+        }
+    }
+
+    #[test]
+    fn list_health_uses_metadata_without_reading_missing_artifact() {
+        let root = temp_root("list-health-metadata");
+        let manifest = root.join("manifest.json");
+        fs::write(
+            &manifest,
+            r#"{
+  "name": "missing-artifact",
+  "modality": "text",
+  "runtime": "onnx-int8",
+  "dim": 384,
+  "shape": {"kind": "dense", "dim": 384},
+  "dtype": "int8",
+  "weights_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "artifact_set_sha256": null,
+  "files": [
+    {"role": "model", "path": "missing.onnx", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "bytes": 123}
+  ],
+  "pooling": "mean",
+  "norm": "unit",
+  "source_hf_id": "fixture/missing",
+  "license": "apache-2.0",
+  "non_commercial": false,
+  "quant_default": {"turbo_quant": {"bits_per_channel_x2": 7}},
+  "truncate_dim": null,
+  "recall_delta": 0.02
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(health_from_manifest(&manifest), LensHealth::Cold);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "calyx-catalog-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
 }

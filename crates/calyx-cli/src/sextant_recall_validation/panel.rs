@@ -8,8 +8,8 @@ use calyx_core::{
     SlotId, SlotKey, SlotResource, SlotShape, SlotState,
 };
 use calyx_registry::{
-    FrozenLensContract, LensRuntime, LensSpec, OnnxLens, Registry, StaticLookupLens, TeiHttpLens,
-    lens_spec_from_manifest_path,
+    FastembedQwen3Lens, FrozenLensContract, LensRuntime, LensSpec, OnnxColbertLens, OnnxLens,
+    Registry, StaticLookupLens, TeiHttpLens, lens_spec_from_manifest_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -173,9 +173,24 @@ fn register_lens(registry: &mut Registry, spec: LensSpec) -> Result<LensId, Stri
                 .register_frozen_with_spec(lens, contract, spec)
                 .map_err(|error| error.to_string())
         }
+        LensRuntime::OnnxColbert { .. } => {
+            let lens = OnnxColbertLens::from_lens_spec(&spec).map_err(|error| error.to_string())?;
+            let contract = lens.contract().clone();
+            registry
+                .register_frozen_with_spec(lens, contract, spec)
+                .map_err(|error| error.to_string())
+        }
         LensRuntime::StaticLookup { .. } => {
             let lens =
                 StaticLookupLens::from_lens_spec(&spec).map_err(|error| error.to_string())?;
+            let contract = lens.contract().clone();
+            registry
+                .register_frozen_with_spec(lens, contract, spec)
+                .map_err(|error| error.to_string())
+        }
+        LensRuntime::FastembedQwen3 { .. } => {
+            let lens =
+                FastembedQwen3Lens::from_lens_spec(&spec).map_err(|error| error.to_string())?;
             let contract = lens.contract().clone();
             registry
                 .register_frozen_with_spec(lens, contract, spec)

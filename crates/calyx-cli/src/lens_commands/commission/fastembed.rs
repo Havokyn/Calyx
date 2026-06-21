@@ -65,10 +65,30 @@ pub(super) fn cache_dir(flags: &CommissionFlags) -> CliResult<PathBuf> {
 pub(super) fn copy_artifacts(files: &OnnxModelFiles, out: &Path) -> CliResult<Vec<Artifact>> {
     let sources = files.artifact_paths();
     let root = common_root(&sources)?;
-    let dest_root = out.join("fastembed-artifacts");
+    copy_artifacts_from_root(files, out, &root, "fastembed-artifacts")
+}
+
+pub(super) fn copy_artifacts_into(
+    files: &OnnxModelFiles,
+    out: &Path,
+    dirname: &str,
+) -> CliResult<Vec<Artifact>> {
+    let sources = files.artifact_paths();
+    let root = common_root(&sources)?;
+    copy_artifacts_from_root(files, out, &root, dirname)
+}
+
+fn copy_artifacts_from_root(
+    files: &OnnxModelFiles,
+    out: &Path,
+    root: &Path,
+    dirname: &str,
+) -> CliResult<Vec<Artifact>> {
+    let sources = files.artifact_paths();
+    let dest_root = out.join(dirname);
     let mut artifacts = Vec::with_capacity(sources.len());
     for source in sources {
-        let relative = source.strip_prefix(&root).map_err(|_| {
+        let relative = source.strip_prefix(root).map_err(|_| {
             CliError::usage(format!(
                 "fastembed artifact {} is outside common root {}",
                 source.display(),
@@ -85,7 +105,7 @@ pub(super) fn copy_artifacts(files: &OnnxModelFiles, out: &Path) -> CliResult<Ve
     Ok(artifacts)
 }
 
-fn common_root(paths: &[PathBuf]) -> CliResult<PathBuf> {
+pub(super) fn common_root(paths: &[PathBuf]) -> CliResult<PathBuf> {
     let first = paths
         .first()
         .ok_or_else(|| CliError::usage("fastembed produced no artifact files"))?;
