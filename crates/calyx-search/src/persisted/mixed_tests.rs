@@ -9,6 +9,8 @@ use super::*;
 #[path = "mixed_tests/helpers.rs"]
 mod helpers;
 use helpers::*;
+#[path = "mixed_tests/segment_edges.rs"]
+mod segment_edges;
 
 #[test]
 fn rebuild_writes_sparse_and_multi_sidecars_and_searches() {
@@ -65,6 +67,13 @@ fn rebuild_writes_sparse_and_multi_sidecars_and_searches() {
     assert_eq!(multi_manifest["row_count"], 3);
     assert_eq!(multi_manifest["token_count"], 5);
     assert_eq!(multi_manifest["segments"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        multi_manifest["segments"][0]["ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
     assert_eq!(
         multi_manifest["segments"][0]["sha256"].as_str().unwrap(),
         sha256_hex(&multi_bytes)
@@ -150,7 +159,9 @@ fn segmented_multi_rebuild_reuses_existing_segment_for_append() {
     assert_eq!(second_entry.token_count, Some(6));
     assert_eq!(segments.len(), 2);
     assert_eq!(reused_segment["row_count"], 3);
+    assert_eq!(reused_segment["ids"].as_array().unwrap().len(), 3);
     assert_eq!(new_segment["row_count"], 1);
+    assert_eq!(new_segment["ids"].as_array().unwrap().len(), 1);
     assert_eq!(second_manifest["row_count"], 4);
     assert_eq!(second_manifest["token_count"], 6);
     assert!(root.join(&first_segment).exists());

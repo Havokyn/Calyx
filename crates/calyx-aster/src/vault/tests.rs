@@ -448,5 +448,6 @@ fn ph35_ledger_group_commit_manual_fsv() {
     assert_eq!(after, wal_rows[ledger_index].value);
 }
 
+mod read_leases;
 mod support;
 use support::{cleanup, fsv_root, hex, reset_dir, row_index, sst_count, test_dir, wal_bytes};
