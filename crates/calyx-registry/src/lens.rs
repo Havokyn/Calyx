@@ -317,6 +317,25 @@ impl Registry {
             .unwrap_or(LensHealth::Loaded))
     }
 
+    /// Probes runtime health by executing a real measurement after the static
+    /// manifest/runtime health check reports the lens loaded.
+    pub fn health_probe(&self, lens_id: LensId, input: &Input) -> LensHealth {
+        match self.health(lens_id) {
+            Ok(LensHealth::Loaded) => match self.measure(lens_id, input) {
+                Ok(_) => LensHealth::Loaded,
+                Err(error) => LensHealth::Failing {
+                    code: error.code.to_string(),
+                    reason: error.message,
+                },
+            },
+            Ok(health) => health,
+            Err(error) => LensHealth::Failing {
+                code: error.code.to_string(),
+                reason: error.message,
+            },
+        }
+    }
+
     fn register_frozen_inner<L>(
         &mut self,
         lens: L,
